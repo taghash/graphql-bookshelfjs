@@ -1,0 +1,18 @@
+{
+  "plugins": ["security", "prettier"],
+  "extends":["plugin:prettier/recommended"],
+  "env": {
+        "node": true,
+        "es6": true
+      },
+      "parserOptions": {
+        "ecmaVersion": 2018,
+        "sourceType": "module",
+        "ecmaFeatures": {
+          "impliedStrict": true
+        }
+      },
+      "rules": {
+        "no-undef": 2
+      }
+  }

@@ -1,6 +1,7 @@
 'use strict';
 
 const loaders = require('./loaders');
+const Promise = require('bluebird');
 
 /**
  * Quick workaround allowing GraphQL to access model attributes directly
@@ -9,66 +10,86 @@ const loaders = require('./loaders');
  * @param {object} collection
  * @returns {*}
  */
-function exposeAttributes(collection) {
-    function exposeModelAttributes(item) {
-        // Make sure that relations are excluded
-        return Object.assign(item, item.serialize({ shallow: true }));
+async function exposeAttributes(collection, options) {
+  async function exposeModelAttributes(item) {
+    // Make sure that relations are excluded
+    return Object.assign(
+      item,
+      await item.toJSON({ shallow: true, ...options })
+    );
+  }
+  if (collection) {
+    if (collection.hasOwnProperty('length')) {
+      return Promise.map(
+        collection.map(m => {
+          return m;
+        }),
+        exposeModelAttributes
+      );
     }
-    if (collection) {
-        if (collection.hasOwnProperty('length')) {
-            return collection.map((item) => { return exposeModelAttributes(item); });
-        }
-        return exposeModelAttributes(collection);
-    }
-    return collection;
+    return exposeModelAttributes(collection);
+  }
+  return collection;
 }
 
 module.exports = {
+  /**
+   *
+   * @returns {function}
+   */
+  getLoaders() {
+    return loaders;
+  },
 
-    /**
-     *
-     * @returns {function}
-     */
-    getLoaders() {
-        return loaders;
-    },
+  /**
+   *
+   * @param {function} Model
+   * @returns {function}
+   */
+  resolverFactory(Model) {
+    return function resolver(modelInstance, args, context = {}, info, extra) {
+      console.log(`info`, info);
+      const { accessor, options } = context;
+      const isAssociation =
+        typeof Model.prototype[info.fieldName] === 'function';
+      const model = isAssociation
+        ? modelInstance.related(info.fieldName)
+        : new Model({}, { accessor });
+      for (const key in args) {
+        model.where(`${model.tableName}.${key}`, args[key]);
+      }
+      if (extra) {
+        switch (typeof extra) {
+          case 'function':
+            extra(model);
+            break;
 
-    /**
-     *
-     * @param {function} Model
-     * @returns {function}
-     */
-    resolverFactory(Model) {
-        return function resolver(modelInstance, args, context, info, extra) {
-            const isAssociation = (typeof Model.prototype[info.fieldName] === 'function');
-            const model = isAssociation ? modelInstance.related(info.fieldName) : new Model();
-            for (const key in args) {
-                model.where(`${model.tableName}.${key}`, args[key]);
+          case 'object':
+            for (const key in extra) {
+              model[key](...extra[key]);
+              delete extra[key];
             }
-            if (extra) {
-                switch (typeof extra) {
-                    case 'function':
-                        extra(model);
-                        break;
+            break;
 
-                    case 'object':
-                        for (const key in extra) {
-                            model[key](...extra[key]);
-                            delete extra[key];
-                        }
-                        break;
-
-                    default:
-                        return Promise.reject('Parameter [extra] should be either a function or an object');
-                }
-            }
-            if (isAssociation) {
-                context && context.loaders && context.loaders(model);
-                return model.fetch().then((c) => { return exposeAttributes(c); });
-            }
-            const fn = (info.returnType.constructor.name === 'GraphQLList') ? 'fetchAll' : 'fetch';
-            return model[fn]().then((c) => { return exposeAttributes(c); });
-        };
-    },
-
+          default:
+            return Promise.reject(
+              'Parameter [extra] should be either a function or an object'
+            );
+        }
+      }
+      if (isAssociation) {
+        context.loaders && context.loaders(model, { accessor, options });
+        return model.fetch(options).then(c => {
+          return exposeAttributes(c, options);
+        });
+      }
+      const fn =
+        info.returnType.constructor.name === 'GraphQLList'
+          ? 'fetchAll'
+          : 'fetch';
+      return model[fn](options).then(c => {
+        return exposeAttributes(c, options);
+      });
+    };
+  },
 };

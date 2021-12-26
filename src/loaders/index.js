@@ -15,11 +15,11 @@ let context;
  * @returns {(DataLoader|boolean)}
  */
 function getLoader(key) {
-    context.loaders = context.loaders || {};
-    if (context.loaders.hasOwnProperty(key)) {
-        return context.loaders[key];
-    }
-    return false;
+  context.loaders = context.loaders || {};
+  if (context.loaders.hasOwnProperty(key)) {
+    return context.loaders[key];
+  }
+  return false;
 }
 
 /**
@@ -28,8 +28,8 @@ function getLoader(key) {
  * @param {DataLoader} loader
  */
 function setLoader(key, loader) {
-    context.loaders = context.loaders || {};
-    context.loaders[key] = loader;
+  context.loaders = context.loaders || {};
+  context.loaders[key] = loader;
 }
 
 /**
@@ -41,47 +41,51 @@ function setLoader(key, loader) {
  * @returns {DataLoader}
  */
 function modelLoader(model, targetIdAttribute, relationType, queryBuilder) {
-    const loaderKey = [
-        model.prototype.tableName,
-        targetIdAttribute,
-        relationType,
-        queryBuilder ? queryBuilder.toString() : '0',
-    ].join('|');
+  const loaderKey = [
+    model.prototype.tableName,
+    targetIdAttribute,
+    relationType,
+    queryBuilder ? queryBuilder.toString() : '0',
+  ].join('|');
 
-    let loader = getLoader(loaderKey);
-    if (!loader) {
-        const collection = (relationType === 'hasMany');
-        loader = new DataLoader((keys) => {
-            return model.query((db) => {
-                Object.assign(db, queryBuilder || {});
-                db.where(targetIdAttribute, 'in', keys);
-            }).fetchAll().then((items) => {
-                const byTargetId = {};
-                items.forEach((item) => {
-                    if (collection) {
-                        const key = item.attributes[targetIdAttribute];
-                        byTargetId[key] = byTargetId[key] ?
-                            byTargetId[key] :
-                            [];
-                        byTargetId[key].push(item);
-                    } else byTargetId[item.attributes[targetIdAttribute]] = item;
-                });
-                return keys.map((key) => {
-                    if (byTargetId.hasOwnProperty(key)) {
-                        return byTargetId[key];
-                    }
-                    if (collection === true) {
-                        return [];
-                    }
-                    return null;
-                });
+  let loader = getLoader(loaderKey);
+  if (!loader) {
+    const collection = relationType === 'hasMany';
+    loader = new DataLoader(
+      keys => {
+        return model
+          .query(db => {
+            Object.assign(db, queryBuilder || {});
+            db.where(targetIdAttribute, 'in', keys);
+          })
+          .fetchAll()
+          .then(items => {
+            const byTargetId = {};
+            items.forEach(item => {
+              if (collection) {
+                const key = item.attributes[targetIdAttribute];
+                byTargetId[key] = byTargetId[key] ? byTargetId[key] : [];
+                byTargetId[key].push(item);
+              } else byTargetId[item.attributes[targetIdAttribute]] = item;
             });
-        }, {
-            cache: false,
-        });
-        setLoader(loaderKey, loader);
-    }
-    return loader;
+            return keys.map(key => {
+              if (byTargetId.hasOwnProperty(key)) {
+                return byTargetId[key];
+              }
+              if (collection === true) {
+                return [];
+              }
+              return null;
+            });
+          });
+      },
+      {
+        cache: false,
+      }
+    );
+    setLoader(loaderKey, loader);
+  }
+  return loader;
 }
 
 /**
@@ -94,156 +98,192 @@ function modelLoader(model, targetIdAttribute, relationType, queryBuilder) {
  * @param {?object} queryBuilder
  * @returns {DataLoader}
  */
-function belongsToManyLoader(model, joinTableName, foreignKey, otherKey, targetIdAttribute, queryBuilder) {
-    const loaderKey = [
-        model.prototype.tableName,
+function belongsToManyLoader(
+  model,
+  joinTableName,
+  foreignKey,
+  otherKey,
+  targetIdAttribute,
+  queryBuilder,
+  { accessor, options }
+) {
+  const loaderKey = [
+    model.prototype.tableName,
+    joinTableName,
+    foreignKey,
+    otherKey,
+    targetIdAttribute,
+    queryBuilder ? queryBuilder.toString() : '0',
+  ].join('|');
+  let loader = getLoader(loaderKey);
+  if (!loader) {
+    loader = new DataLoader(
+      keys => {
+        return model
+          .query(db => {
+            Object.assign(db, queryBuilder || {});
+            db.select([
+              `${model.prototype.tableName}.*`,
+              `${joinTableName}.${foreignKey}`,
+              `${joinTableName}.${otherKey}`,
+            ])
+              .innerJoin(
+                joinTableName,
+                `${model.prototype.tableName}.${targetIdAttribute}`,
+                '=',
+                `${joinTableName}.${otherKey}`
+              )
+              .where(`${joinTableName}.${foreignKey}`, 'in', keys);
+          })
+          .fetchAll({
+            accessor,
+            ...options,
+          })
+          .then(items => {
+            const byForeignKey = {};
+            items.forEach(item => {
+              const key = item.attributes[foreignKey];
+              byForeignKey[key] = byForeignKey[key] ? byForeignKey[key] : [];
+              byForeignKey[key].push(item);
+            });
+            return keys.map(key => {
+              if (byForeignKey.hasOwnProperty(key)) {
+                return byForeignKey[key];
+              }
+              return [];
+            });
+          });
+      },
+      {
+        cache: false,
+      }
+    );
+    setLoader(loaderKey, loader);
+  }
+  return loader;
+}
+
+/**
+ *
+ * @param {object} target
+ */
+function belongsTo(target, { accessor, options }) {
+  if (target.fetch.__wrapped) return;
+  shimmer.wrap(target, 'fetch', original => {
+    return function fetch() {
+      const model = this.relatedData.target;
+      const targetIdAttribute = this.relatedData.key('targetIdAttribute');
+      const parentFK = this.relatedData.key('parentFk');
+      const knex = this._knex;
+      return modelLoader(model, targetIdAttribute, 'belongsTo', knex, {
+        accessor,
+        options,
+      }).load(parentFK);
+    };
+  });
+}
+
+/**
+ *
+ * @param {object} target
+ */
+function hasOne(target, { accessor, options }) {
+  if (target.fetch.__wrapped) return;
+  shimmer.wrap(target, 'fetch', original => {
+    return function fetch() {
+      const model = this.relatedData.target;
+      const foreignKey = this.relatedData.key('foreignKey');
+      const parentFK = this.relatedData.key('parentFk');
+      const knex = this._knex;
+      return modelLoader(model, foreignKey, 'hasOne', knex, {
+        accessor,
+        options,
+      }).load(parentFK);
+    };
+  });
+}
+
+/**
+ *
+ * @param {object} target
+ */
+function hasMany(target, { accessor, options }) {
+  if (target.fetch.__wrapped) return;
+  shimmer.wrap(target, 'fetch', original => {
+    return function fetch() {
+      const model = this.relatedData.target;
+      const foreignKey = this.relatedData.key('foreignKey');
+      const parentFK = this.relatedData.key('parentFk');
+      const knex = this._knex;
+      return modelLoader(model, foreignKey, 'hasMany', knex, {
+        accessor,
+        options,
+      }).load(parentFK);
+    };
+  });
+}
+
+/**
+ *
+ * @param {object} target
+ */
+function belongsToMany(target, { accessor, options }) {
+  if (target.fetch.__wrapped) return;
+  shimmer.wrap(target, 'fetch', original => {
+    return function fetch() {
+      const model = this.relatedData.target;
+      const joinTableName =
+        this.relatedData.key('joinTableName') ||
+        [this.tableName(), this.relatedData.key('parentTableName')]
+          .sort()
+          .join('_');
+      const foreignKey = this.relatedData.key('foreignKey');
+      const otherKey = this.relatedData.key('otherKey');
+      const targetIdAttribute = this.relatedData.key('targetIdAttribute');
+      const parentFK = this.relatedData.key('parentFk');
+      const knex = this._knex;
+      return belongsToManyLoader(
+        model,
         joinTableName,
         foreignKey,
         otherKey,
         targetIdAttribute,
-        queryBuilder ? queryBuilder.toString() : '0',
-    ].join('|');
-    let loader = getLoader(loaderKey);
-    if (!loader) {
-        loader = new DataLoader((keys) => {
-            return model.query((db) => {
-                Object.assign(db, queryBuilder || {});
-                db.select([
-                    `${model.prototype.tableName}.*`,
-                    `${joinTableName}.${foreignKey}`,
-                    `${joinTableName}.${otherKey}`,
-                ]).innerJoin(
-                    joinTableName, `${model.prototype.tableName}.${targetIdAttribute}`,
-                    '=',
-                    `${joinTableName}.${otherKey}`)
-                .where(`${joinTableName}.${foreignKey}`, 'in', keys);
-            })
-            .fetchAll()
-            .then((items) => {
-                const byForeignKey = {};
-                items.forEach((item) => {
-                    const key = item.attributes[foreignKey];
-                    byForeignKey[key] = byForeignKey[key] ?
-                        byForeignKey[key] :
-                        [];
-                    byForeignKey[key].push(item);
-                });
-                return keys.map((key) => {
-                    if (byForeignKey.hasOwnProperty(key)) {
-                        return byForeignKey[key];
-                    }
-                    return [];
-                });
-            });
-        }, {
-            cache: false,
-        });
-        setLoader(loaderKey, loader);
+        knex,
+        { accessor, options }
+      ).load(parentFK);
+    };
+  });
+}
+
+/**
+ *
+ * @param {object} target
+ */
+module.exports = function loaders(target, { accessor, options }) {
+  context = this;
+  context.__bookshelfResolver = context.__bookshelfResolver || {};
+  context = context.__bookshelfResolver;
+  options.accessor = accessor;
+  if (target.relatedData) {
+    switch (target.relatedData.type) {
+      case 'belongsTo':
+        belongsTo(target, { accessor, options });
+        break;
+
+      case 'belongsToMany':
+        belongsToMany(target, { accessor, options });
+        break;
+
+      case 'hasMany':
+        hasMany(target, { accessor, options });
+        break;
+
+      case 'hasOne':
+        hasOne(target, { accessor, options });
+        break;
+
+      default:
+        break;
     }
-    return loader;
-}
-
-/**
- *
- * @param {object} target
- */
-function belongsTo(target) {
-    if (target.fetch.__wrapped) return;
-    shimmer.wrap(target, 'fetch', (original) => {
-        return function fetch() {
-            const model = this.relatedData.target;
-            const targetIdAttribute = this.relatedData.key('targetIdAttribute');
-            const parentFK = this.relatedData.key('parentFk');
-            const knex = this._knex;
-            return modelLoader(model, targetIdAttribute, 'belongsTo', knex).load(parentFK);
-        };
-    });
-}
-
-/**
- *
- * @param {object} target
- */
-function hasOne(target) {
-    if (target.fetch.__wrapped) return;
-    shimmer.wrap(target, 'fetch', (original) => {
-        return function fetch() {
-            const model = this.relatedData.target;
-            const foreignKey = this.relatedData.key('foreignKey');
-            const parentFK = this.relatedData.key('parentFk');
-            const knex = this._knex;
-            return modelLoader(model, foreignKey, 'hasOne', knex).load(parentFK);
-        };
-    });
-}
-
-/**
- *
- * @param {object} target
- */
-function hasMany(target) {
-    if (target.fetch.__wrapped) return;
-    shimmer.wrap(target, 'fetch', (original) => {
-        return function fetch() {
-            const model = this.relatedData.target;
-            const foreignKey = this.relatedData.key('foreignKey');
-            const parentFK = this.relatedData.key('parentFk');
-            const knex = this._knex;
-            return modelLoader(model, foreignKey, 'hasMany', knex).load(parentFK);
-        };
-    });
-}
-
-/**
- *
- * @param {object} target
- */
-function belongsToMany(target) {
-    if (target.fetch.__wrapped) return;
-    shimmer.wrap(target, 'fetch', (original) => {
-        return function fetch() {
-            const model = this.relatedData.target;
-            const joinTableName = this.relatedData.key('joinTableName') ||
-                [this.tableName(), this.relatedData.key('parentTableName')].sort().join('_');
-            const foreignKey = this.relatedData.key('foreignKey');
-            const otherKey = this.relatedData.key('otherKey');
-            const targetIdAttribute = this.relatedData.key('targetIdAttribute');
-            const parentFK = this.relatedData.key('parentFk');
-            const knex = this._knex;
-            return belongsToManyLoader(model, joinTableName, foreignKey, otherKey, targetIdAttribute, knex)
-                .load(parentFK);
-        };
-    });
-}
-
-/**
- *
- * @param {object} target
- */
-module.exports = function loaders(target) {
-    context = this;
-    context.__bookshelfResolver = context.__bookshelfResolver || {};
-    context = context.__bookshelfResolver;
-    if (target.relatedData) {
-        switch (target.relatedData.type) {
-        case 'belongsTo':
-            belongsTo(target);
-            break;
-
-        case 'belongsToMany':
-            belongsToMany(target);
-            break;
-
-        case 'hasMany':
-            hasMany(target);
-            break;
-
-        case 'hasOne':
-            hasOne(target);
-            break;
-
-        default:
-            break;
-        }
-    }
+  }
 };
