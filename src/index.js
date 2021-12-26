@@ -55,13 +55,20 @@ const extractSelectionFields = (Model, fieldNodes = []) => {
     for (let j = 0; j < columnsToSelect.length; j++) {
       const column = columnsToSelect[j];
       const isAssociation = typeof Model.prototype[column] === 'function';
-      if (!isAssociation) {
-        columns.push(column);
+      const isVirtual =
+        Model.prototype.virtuals &&
+        Object.keys(Model.prototype.virtuals).indexOf(column) > -1;
+      if (!isAssociation && !isVirtual) {
+        columns.push(`${Model.prototype.tableName}.${column}`);
       }
     }
   }
   columns = lodash.uniq(columns);
   if (columns.length > 0) {
+    // Id column will be needed subsequently by other resolvers
+    if (columns.indexOf('id') === -1 && Model.prototype.idAttribute !== null) {
+      columns.push('id');
+    }
     return columns;
   }
   return '*';
