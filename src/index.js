@@ -2,6 +2,7 @@
 
 const loaders = require('./loaders');
 const Promise = require('bluebird');
+const lodash = require('lodash');
 
 /**
  * Quick workaround allowing GraphQL to access model attributes directly
@@ -13,10 +14,7 @@ const Promise = require('bluebird');
 async function exposeAttributes(collection, options) {
   async function exposeModelAttributes(item) {
     // Make sure that relations are excluded
-    return Object.assign(
-      item,
-      await item.toJSON({ shallow: true, ...options })
-    );
+    return await item.toJSON({ shallow: true, ...options });
   }
   if (collection) {
     if (collection.hasOwnProperty('length')) {
@@ -31,6 +29,43 @@ async function exposeAttributes(collection, options) {
   }
   return collection;
 }
+
+// @see https://github.com/graphql/graphql-js/blob/872c6b98a2fd21946aec25e757236c6652f16229/src/language/ast.ts
+const extractSelectionFields = (Model, fieldNodes = []) => {
+  let columns = [];
+  // By default, return everything
+  if (!fieldNodes || fieldNodes.length === 0) return '*';
+  for (let i = 0; i < fieldNodes.length; i++) {
+    const node = fieldNodes[i];
+    if (node.kind !== 'Field') {
+      continue;
+    }
+    const selections =
+      (node.selectionSet && node.selectionSet.selections) || [];
+    // Extract the requested columns from the query
+    let columnsToSelect = selections.map(selectionNode => {
+      if (!selectionNode.kind === 'Field') return null;
+      return selectionNode.name && selectionNode.name.value;
+    });
+    // Filter out nulls
+    columnsToSelect = columnsToSelect.filter(c => !!c);
+    if (columnsToSelect.length === 0) {
+      continue;
+    }
+    for (let j = 0; j < columnsToSelect.length; j++) {
+      const column = columnsToSelect[j];
+      const isAssociation = typeof Model.prototype[column] === 'function';
+      if (!isAssociation) {
+        columns.push(column);
+      }
+    }
+  }
+  columns = lodash.uniq(columns);
+  if (columns.length > 0) {
+    return columns;
+  }
+  return '*';
+};
 
 module.exports = {
   /**
@@ -47,8 +82,14 @@ module.exports = {
    * @returns {function}
    */
   resolverFactory(Model) {
-    return function resolver(modelInstance, args, context = {}, info, extra) {
-      console.log(`info`, info);
+    return async function resolver(
+      modelInstance,
+      args,
+      context = {},
+      info,
+      extra
+    ) {
+      console.log(`info`, require('util').inspect(info, { depth: null }));
       const { accessor, options } = context;
       const isAssociation =
         typeof Model.prototype[info.fieldName] === 'function';
@@ -72,24 +113,30 @@ module.exports = {
             break;
 
           default:
-            return Promise.reject(
+            throw new Error(
               'Parameter [extra] should be either a function or an object'
             );
         }
       }
+      const columns = extractSelectionFields(Model, info.fieldNodes);
       if (isAssociation) {
         context.loaders && context.loaders(model, { accessor, options });
-        return model.fetch(options).then(c => {
-          return exposeAttributes(c, options);
-        });
+        const associationResult = await model.fetch({ ...options, columns });
+        const jsonResult = await exposeAttributes(associationResult, options);
+        console.log(`result`, jsonResult);
       }
       const fn =
         info.returnType.constructor.name === 'GraphQLList'
           ? 'fetchAll'
           : 'fetch';
-      return model[fn](options).then(c => {
-        return exposeAttributes(c, options);
-      });
+      return model[fn]({ ...options, columns })
+        .then(c => {
+          return exposeAttributes(c, options);
+        })
+        .then(result => {
+          console.log(`result`, result);
+          return result;
+        });
     };
   },
 };
