@@ -14,12 +14,18 @@ const lodash = require('lodash');
 async function exposeAttributes(collection, options) {
   async function exposeModelAttributes(item) {
     // Make sure that relations are excluded
-    return await item.toJSON({ shallow: true, ...options });
+    return {
+      ...(await item.toJSON({ shallow: true, ...options })),
+      __model: item,
+    };
   }
   if (collection) {
     if (collection.hasOwnProperty('length')) {
       return Promise.map(
         collection.map(m => {
+          m.setAccessor(
+            collection.getAccessor() || m.getAccessor() || options.accessor
+          );
           return m;
         }),
         exposeModelAttributes
@@ -31,10 +37,11 @@ async function exposeAttributes(collection, options) {
 }
 
 // @see https://github.com/graphql/graphql-js/blob/872c6b98a2fd21946aec25e757236c6652f16229/src/language/ast.ts
+// @see https://www.prisma.io/blog/graphql-server-basics-demystifying-the-info-argument-in-graphql-resolvers-6f26249f613a
 const extractSelectionFields = (Model, fieldNodes = []) => {
   let columns = [];
   // By default, return everything
-  if (!fieldNodes || fieldNodes.length === 0) return '*';
+  if (!fieldNodes || fieldNodes.length === 0) return null;
   for (let i = 0; i < fieldNodes.length; i++) {
     const node = fieldNodes[i];
     if (node.kind !== 'Field') {
@@ -65,13 +72,17 @@ const extractSelectionFields = (Model, fieldNodes = []) => {
   }
   columns = lodash.uniq(columns);
   if (columns.length > 0) {
+    console.log(Model.prototype.tableName, `:`, columns);
     // Id column will be needed subsequently by other resolvers
-    if (columns.indexOf('id') === -1 && Model.prototype.idAttribute !== null) {
-      columns.push('id');
+    if (
+      columns.indexOf(`${Model.prototype.tableName}.id`) === -1 &&
+      Model.prototype.idAttribute !== null
+    ) {
+      columns.push(`${Model.prototype.tableName}.id`);
     }
     return columns;
   }
-  return '*';
+  return null;
 };
 
 module.exports = {
@@ -89,20 +100,24 @@ module.exports = {
    * @returns {function}
    */
   resolverFactory(Model) {
-    return async function resolver(
-      modelInstance,
-      args,
-      context = {},
-      info,
-      extra
-    ) {
-      console.log(`info`, require('util').inspect(info, { depth: null }));
+    return async function resolver(parent, args, context = {}, info, extra) {
+      // console.log(`info`, require('util').inspect(info, { depth: null }));
+      console.log(`info.fieldName`, info.fieldName);
+      console.log(`args`, args);
       const { accessor, options } = context;
-      const isAssociation =
-        typeof Model.prototype[info.fieldName] === 'function';
+      let modelInstance = parent && parent.__model;
+      let isAssociation = typeof Model.prototype[info.fieldName] === 'function';
+      if (
+        Object.keys(args).length === 0 &&
+        modelInstance &&
+        typeof modelInstance[info.fieldName] === 'function'
+      ) {
+        isAssociation = true;
+      }
       const model = isAssociation
         ? modelInstance.related(info.fieldName)
         : new Model({}, { accessor });
+      model.setAccessor(accessor);
       for (const key in args) {
         model.where(`${model.tableName}.${key}`, args[key]);
       }
@@ -128,7 +143,13 @@ module.exports = {
       const columns = extractSelectionFields(Model, info.fieldNodes);
       if (isAssociation) {
         context.loaders && context.loaders(model, { accessor, options });
-        const associationResult = await model.fetch({ ...options, columns });
+        let associationResult;
+        if (columns) {
+          associationResult = await model.fetch({ ...options, columns });
+        } else {
+          associationResult = await model.fetch(options);
+        }
+        associationResult.setAccessor(accessor);
         const jsonResult = await exposeAttributes(associationResult, options);
         console.log(`result`, jsonResult);
       }
@@ -136,14 +157,16 @@ module.exports = {
         info.returnType.constructor.name === 'GraphQLList'
           ? 'fetchAll'
           : 'fetch';
-      return model[fn]({ ...options, columns })
-        .then(c => {
-          return exposeAttributes(c, options);
-        })
-        .then(result => {
-          console.log(`result`, result);
-          return result;
-        });
+      let modelResult;
+      if (columns) {
+        modelResult = await model[fn]({ ...options, columns });
+      } else {
+        modelResult = await model[fn](options);
+      }
+      modelResult.setAccessor(accessor);
+      const result = await exposeAttributes(modelResult, options);
+      console.log(`result`, result);
+      return result;
     };
   },
 };
